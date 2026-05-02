@@ -18,6 +18,7 @@ import io.github.aoguai.sesameag.util.FriendGuard
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.RandomUtil
 import io.github.aoguai.sesameag.util.ResChecker
+import io.github.aoguai.sesameag.util.RpcCache
 import io.github.aoguai.sesameag.util.TaskBlacklist
 import io.github.aoguai.sesameag.util.maps.UserMap
 import org.json.JSONArray
@@ -1289,6 +1290,7 @@ class AntOrchard : ModelTask() {
                 )
                 if (ResChecker.checkRes(TAG, awardResp)) {
                     Log.orchard("农场乐园🎮[$title]#${awardCount}g肥料")
+                    RpcCache.invalidate("com.alipay.charitygamecenter.queryOptionalPlay")
                 } else {
                     Log.orchard(TAG, "农场乐园奖励领取失败[$title] ${awardResp.toString()}")
                 }
