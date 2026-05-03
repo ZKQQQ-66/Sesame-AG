@@ -259,6 +259,7 @@ private val sportsDefaultBlacklist = setOf(
     // 运动
     "去设计签名",
     "签名设计",
+    "真人手写！定制签名",
     "个性签名",
     "玩游戏"
 )
