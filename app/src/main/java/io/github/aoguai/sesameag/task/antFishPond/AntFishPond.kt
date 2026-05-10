@@ -19,7 +19,6 @@ import org.json.JSONObject
 
 class AntFishPond : ModelTask() {
     private lateinit var fishPondTask: BooleanModelField
-    private lateinit var fishPondVisitTask: BooleanModelField
     private lateinit var autoFish: BooleanModelField
     private lateinit var fishDailyLimit: IntegerModelField
 
@@ -35,14 +34,9 @@ class AntFishPond : ModelTask() {
     override fun getFields(): ModelFields {
         val modelFields = ModelFields()
         modelFields.addField(
-            BooleanModelField("fishPondTask", "领钓竿任务", true).withDesc(
-                "自动处理福气鱼池签到、每日宝箱、明日钓竿、钓鱼次数领奖和稳定浏览任务。"
+            BooleanModelField("fishPondTask", "收取鱼池任务奖励", true).withDesc(
+                "自动领取福气鱼池任务奖励。"
             ).also { fishPondTask = it }
-        )
-        modelFields.addField(
-            BooleanModelField("fishPondVisitTask", "浏览任务领钓竿", true).withDesc(
-                "仅处理抓包已验证的 IEP 浏览任务：逛好物得钓竿、看精选商品得钓竿。游戏、分享、订阅等任务默认跳过。"
-            ).also { fishPondVisitTask = it }
         )
         modelFields.addField(
             BooleanModelField("autoFish", "自动钓鱼", true).withDesc(
@@ -50,8 +44,8 @@ class AntFishPond : ModelTask() {
             ).also { autoFish = it }
         )
         modelFields.addField(
-            IntegerModelField("fishDailyLimit", "单轮最多钓鱼次数", DEFAULT_FISH_LIMIT, 0, 200).withDesc(
-                "限制每次模块运行最多调用 fishpondAngle 的次数，0 表示不限制；默认保守限制为 30 次。"
+            IntegerModelField("fishDailyLimit", "每日钓鱼次数", DEFAULT_FISH_LIMIT, 0, 200).withDesc(
+                "限制当天最多钓鱼的次数，0 表示不限制；默认保守限制为 30 次。"
             ).also { fishDailyLimit = it }
         )
         return modelFields
@@ -304,8 +298,7 @@ class AntFishPond : ModelTask() {
                 return claimTaskAward(sceneCode, taskId, taskTitle, taskKey)
             }
 
-            if (fishPondVisitTask.value == true &&
-                actionType == ACTION_VISIT &&
+            if (actionType == ACTION_VISIT &&
                 taskStatus == STATUS_TODO &&
                 SUPPORTED_VISIT_TASKS.contains(taskId)
             ) {
@@ -423,8 +416,7 @@ class AntFishPond : ModelTask() {
                 }
                 return true
             }
-            if (fishPondVisitTask.value == true &&
-                actionType == ACTION_VISIT &&
+            if (actionType == ACTION_VISIT &&
                 taskStatus == STATUS_TODO &&
                 SUPPORTED_VISIT_TASKS.contains(taskId)
             ) {
@@ -463,9 +455,21 @@ class AntFishPond : ModelTask() {
         }
 
         val limit = fishDailyLimit.value ?: DEFAULT_FISH_LIMIT
-        val maxCount = if (limit <= 0) Int.MAX_VALUE else limit
+        var usedToday = Status.getIntFlagToday(StatusFlags.FLAG_ANTFISHPOND_FISH_COUNT) ?: 0
+        if (limit <= 0 || usedToday < limit) {
+            Status.removeFlag(StatusFlags.FLAG_ANTFISHPOND_FISH_LIMIT_REACHED)
+        }
+        if (limit > 0 && usedToday >= limit) {
+            Status.setFlagToday(StatusFlags.FLAG_ANTFISHPOND_FISH_LIMIT_REACHED)
+            Log.fishpond("今日自动钓鱼已达每日上限${limit}次，当前累计${usedToday}次，剩余钓竿${rodCount}根")
+            return
+        }
+
         var handledCount = 0
-        while (rodCount > 0 && handledCount < maxCount && !Thread.currentThread().isInterrupted) {
+        while (rodCount > 0 && !Thread.currentThread().isInterrupted) {
+            if (limit > 0 && usedToday >= limit) {
+                break
+            }
             if (markExchangeReached(indexJson)) {
                 break
             }
@@ -485,10 +489,8 @@ class AntFishPond : ModelTask() {
             }
 
             handledCount++
-            Status.setIntFlagToday(
-                StatusFlags.FLAG_ANTFISHPOND_FISH_COUNT,
-                (Status.getIntFlagToday(StatusFlags.FLAG_ANTFISHPOND_FISH_COUNT) ?: 0) + 1
-            )
+            usedToday += 1
+            Status.setIntFlagToday(StatusFlags.FLAG_ANTFISHPOND_FISH_COUNT, usedToday)
 
             val angleInfo = angleInfoOf(angleJson)
             if (angleInfo.optString("fishType") == FISH_TYPE_WELFARE) {
@@ -517,9 +519,11 @@ class AntFishPond : ModelTask() {
             GlobalThreadPools.sleepCompat(SHORT_INTERVAL_MS)
         }
 
-        if (handledCount >= maxCount && rodCount > 0) {
+        if (limit > 0 && usedToday >= limit) {
             Status.setFlagToday(StatusFlags.FLAG_ANTFISHPOND_FISH_LIMIT_REACHED)
-            Log.fishpond("本轮自动钓鱼已达配置上限${maxCount}次，剩余钓竿${rodCount}根")
+            if (rodCount > 0) {
+                Log.fishpond("今日自动钓鱼已达每日上限${limit}次，本轮执行${handledCount}次，剩余钓竿${rodCount}根")
+            }
         }
     }
 

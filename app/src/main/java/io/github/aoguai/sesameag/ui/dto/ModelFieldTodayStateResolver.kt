@@ -194,19 +194,18 @@ object ModelFieldTodayStateResolver {
                     reason = "今日摇钱树施肥已达上限"
                 )
 
-            "AntFishPond.fishPondTask",
-            "AntFishPond.fishPondVisitTask" ->
+            "AntFishPond.fishPondTask" ->
                 allFlags(
                     StatusFlags.FLAG_ANTFISHPOND_SIGN_DONE,
                     StatusFlags.FLAG_ANTFISHPOND_GIFT_BOX_DONE,
                     StatusFlags.FLAG_ANTFISHPOND_TOMORROW_ROD_DONE,
                     StatusFlags.FLAG_ANTFISHPOND_TASKS_DONE,
-                    reason = "今日福气鱼池钓竿任务已处理"
+                    reason = "今日鱼池任务奖励已处理"
                 )
 
             "AntFishPond.autoFish",
             "AntFishPond.fishDailyLimit" ->
-                fishPondAutoFishState()
+                fishPondAutoFishState(modelFields)
 
             "AntStall.stallThrowManure" ->
                 flag(StatusFlags.FLAG_ANTSTALL_THROW_MANURE_LIMIT, "今日丢肥料已达上限")
@@ -292,7 +291,7 @@ object ModelFieldTodayStateResolver {
         )
     }
 
-    private fun fishPondAutoFishState(): ModelFieldTodayState {
+    private fun fishPondAutoFishState(modelFields: ModelFields): ModelFieldTodayState {
         return when {
             Status.hasFlagToday(StatusFlags.FLAG_ANTFISHPOND_EXCHANGE_REACHED) ->
                 inactive("福气鱼池已达到兑换条件，等待补抓兑换 RPC")
@@ -300,10 +299,11 @@ object ModelFieldTodayStateResolver {
             Status.hasFlagToday(StatusFlags.FLAG_ANTFISHPOND_RISK_TOKEN_MISSING) ->
                 inactive("缺少 fishpondAngle riskToken，今日已跳过自动钓鱼")
 
-            Status.hasFlagToday(StatusFlags.FLAG_ANTFISHPOND_FISH_LIMIT_REACHED) ->
-                inactive("本轮自动钓鱼已达配置上限")
-
-            else -> ModelFieldTodayState()
+            else -> limitReached(
+                current = Status.getIntFlagToday(StatusFlags.FLAG_ANTFISHPOND_FISH_COUNT),
+                limit = intValue(modelFields["fishDailyLimit"]),
+                reason = "今日自动钓鱼已达每日上限"
+            )
         }
     }
 

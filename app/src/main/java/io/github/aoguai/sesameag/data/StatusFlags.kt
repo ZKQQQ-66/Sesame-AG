@@ -262,7 +262,7 @@ object StatusFlags {
     /** 福气鱼池：今日自动钓鱼次数 */
     const val FLAG_ANTFISHPOND_FISH_COUNT = "AntFishPond::fishCount"
 
-    /** 福气鱼池：本轮自动钓鱼达到配置上限 */
+    /** 福气鱼池：今日自动钓鱼达到配置上限 */
     const val FLAG_ANTFISHPOND_FISH_LIMIT_REACHED = "AntFishPond::fishLimitReached"
 
     /** 蚂蚁新村：今日丢肥料是否达到上限 */
