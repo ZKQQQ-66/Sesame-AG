@@ -217,9 +217,11 @@ class AntFarm : ModelTask() {
     internal var donationAmount: IntegerModelField? = null
 
     internal var donationCompetition: BooleanModelField? = null
+    internal var donationCompetitionMode: ChoiceModelField? = null
     internal var receiveDonationCompetitionAward: BooleanModelField? = null
     internal var donationCompetitionTrySpecialFood: BooleanModelField? = null
     internal var donationCompetitionSpecialFoodCount: IntegerModelField? = null
+    internal var stableDonationCompetitionAnytimeCheck: BooleanModelField? = null
     internal var donationCompetitionTime: StringModelField? = null
     internal var watchDonationRank: BooleanModelField? = null
     internal var watchDonationAdvanceTime: IntegerModelField? = null
@@ -647,6 +649,23 @@ class AntFarm : ModelTask() {
                 false
             ).withDesc("执行庄园捐蛋排位赛，自动加入并按配置执行卡点反超逻辑。").also { donationCompetition = it })
         modelFields.addField(
+            ChoiceModelField(
+                "donationCompetitionMode",
+                "捐蛋排位赛 | 模式",
+                DonationCompetitionMode.AGGRESSIVE,
+                DonationCompetitionMode.nickNames
+            ).withDesc("激进模式将尽量争取第一名排名；稳定模式按赛季进度只争取当天所需最低星星，必要时自动回退激进逻辑。").also {
+                donationCompetitionMode = it
+            })
+        modelFields.addField(
+            BooleanModelField(
+                "stableDonationCompetitionAnytimeCheck",
+                "捐蛋排位赛 | 稳定模式非蹲点评估",
+                false
+            ).withDesc("仅稳定模式生效；开启后，在每日结算前的每轮庄园流程中按稳定目标判断是否补捐。").also {
+                stableDonationCompetitionAnytimeCheck = it
+            })
+        modelFields.addField(
             BooleanModelField(
                 "receiveDonationCompetitionAward",
                 "捐蛋排位赛 | 领取我的奖励",
@@ -685,7 +704,7 @@ class AntFarm : ModelTask() {
                 "watchDonationRank",
                 "捐蛋排位赛 | 轮询蹲点",
                 false
-            ).withDesc("在排位赛结束前开启高频轮询，确保在最后时刻保持第一名。").also { watchDonationRank = it })
+            ).withDesc("在排位赛结束前开启高频轮询。激进模式将争取第一名排名；稳定模式将守住今日所需最低星数所在排名。").also { watchDonationRank = it })
         modelFields.addField(
             IntegerModelField(
                 "watchDonationAdvanceTime",
@@ -5087,6 +5106,14 @@ class AntFarm : ModelTask() {
                 "当日列表中全部可捐项目",
                 "当日列表中所有未捐项目"
             )
+        }
+    }
+
+    interface DonationCompetitionMode {
+        companion object {
+            const val AGGRESSIVE: Int = 0
+            const val STABLE: Int = 1
+            val nickNames: Array<String?> = arrayOf<String?>("激进模式", "稳定模式")
         }
     }
 

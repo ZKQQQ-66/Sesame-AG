@@ -16,6 +16,12 @@ import org.json.JSONObject
 object FarmGame {
     private const val TAG = "FarmGame"
     private const val QUERY_GAME_LIST_RPC = "com.alipay.charitygamecenter.queryGameList"
+    private const val QUERY_OPTIONAL_PLAY_RPC = "com.alipay.charitygamecenter.queryOptionalPlay"
+    private const val LEYUAN_DAILY_TASK_SCENE_CODE = "ANTFARM_LEYUAN_DAILY_TASK"
+    private const val LEYUAN_SIGN_TASK_TYPE = "2026cc_lyqd"
+    private const val LEYUAN_OPEN_BOX_TASK_TYPE = "2026cc_GAME_ljkbx"
+    private const val LEYUAN_OPEN_BOX_TARGET_COUNT = 10
+    private val LEYUAN_LIMITED_TASK_TYPES = setOf(LEYUAN_SIGN_TASK_TYPE, LEYUAN_OPEN_BOX_TASK_TYPE)
 
     private fun isDrawQuotaExhausted(message: String): Boolean {
         return message.contains("抽奖次数不足") ||
@@ -302,6 +308,7 @@ object FarmGame {
                     break
                 }
             }
+            receiveLeyuanLimitedBenefitAwards()
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -310,6 +317,107 @@ object FarmGame {
             if (totalParadiseCoins > 0) {
                 Log.farm("庄园小鸡🎁[本次任务总计获得乐园币: ${totalParadiseCoins}]")
             }
+        }
+    }
+
+    private fun receiveLeyuanLimitedBenefitAwards() {
+        try {
+            val attemptedTaskTypes = mutableSetOf<String>()
+            repeat(LEYUAN_LIMITED_TASK_TYPES.size + 1) {
+                RpcCache.invalidate(QUERY_OPTIONAL_PLAY_RPC)
+                val response = JSONObject(AntFarmRpcCall.queryOptionalPlay())
+                if (!ResChecker.checkRes(TAG, response)) {
+                    Log.farm("小鸡乐园限时福利查询失败: $response")
+                    return
+                }
+
+                val taskList = response.optJSONObject("taskTriggerPlayInfo")
+                    ?.optJSONArray("taskList")
+                    ?: return
+                val task = findNextLeyuanLimitedBenefitTask(taskList, attemptedTaskTypes) ?: return
+                val taskType = task.optString("taskType")
+                attemptedTaskTypes.add(taskType)
+
+                val title = task.optJSONObject("bizInfo")
+                    ?.optString("title")
+                    ?.takeIf { it.isNotBlank() }
+                    ?: taskType
+                if (taskType == LEYUAN_OPEN_BOX_TASK_TYPE && !hasOpenedEnoughGameCenterBoxes()) {
+                    Log.farm("小鸡乐园限时福利[$title]已完成但开箱数未确认达到${LEYUAN_OPEN_BOX_TARGET_COUNT}个，暂不领奖")
+                    return@repeat
+                }
+
+                val sceneCode = task.optString("sceneCode")
+                val awardCount = task.optInt("awardCount").takeIf { it > 0 }
+                    ?: task.optInt("totalAwardCount").takeIf { it > 0 }
+                    ?: task.optInt("nextStageAwardCount").takeIf { it > 0 }
+                if (sceneCode.isBlank() || awardCount == null) {
+                    Log.farm("小鸡乐园限时福利[$title]跳过：缺少 sceneCode 或 awardCount | raw=$task")
+                    return@repeat
+                }
+
+                val awardResp = JSONObject(
+                    AntFarmRpcCall.receiveTaskAwardAntFarm(sceneCode, taskType, awardCount)
+                )
+                if (ResChecker.checkRes(TAG, awardResp)) {
+                    Log.farm("小鸡乐园限时福利🎁[$title]#${awardCount}乐园币")
+                    RpcCache.invalidate(QUERY_OPTIONAL_PLAY_RPC)
+                } else {
+                    Log.farm("小鸡乐园限时福利[$title]领取失败: $awardResp")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.printStackTrace(TAG, "receiveLeyuanLimitedBenefitAwards err:", t)
+        }
+    }
+
+    private fun findNextLeyuanLimitedBenefitTask(
+        taskList: JSONArray,
+        attemptedTaskTypes: Set<String>
+    ): JSONObject? {
+        for (i in 0 until taskList.length()) {
+            val task = taskList.optJSONObject(i) ?: continue
+            val taskType = task.optString("taskType")
+            if (task.optString("sceneCode") != LEYUAN_DAILY_TASK_SCENE_CODE) continue
+            if (!LEYUAN_LIMITED_TASK_TYPES.contains(taskType)) continue
+            if (task.optString("taskStatus") != "FINISHED") continue
+            if (attemptedTaskTypes.contains(taskType)) continue
+            return task
+        }
+        return null
+    }
+
+    private fun hasOpenedEnoughGameCenterBoxes(): Boolean {
+        val openedCount = queryGameCenterOpenedBoxCount()
+        if (openedCount == null) {
+            Log.farm("小鸡乐园限时福利[玩游戏累计开宝箱]无法确认已开箱数量，暂不领奖")
+            return false
+        }
+        return openedCount >= LEYUAN_OPEN_BOX_TARGET_COUNT
+    }
+
+    private fun queryGameCenterOpenedBoxCount(): Int? {
+        return try {
+            RpcCache.invalidate(QUERY_GAME_LIST_RPC)
+            val response = JSONObject(AntFarmRpcCall.queryGameList())
+            val jo = response.optJSONObject("resData") ?: response
+            if (!jo.optBoolean("success", response.optBoolean("success"))) {
+                Log.farm("小鸡乐园开箱进度查询失败: $response")
+                return null
+            }
+            val rights = findFirstObjectByKey(jo, "gameCenterDrawRights")
+                ?: findFirstObjectByKey(jo, "gameDrawAwardActivity")
+                ?: findFirstObjectByKey(jo, "gameEntryInfo")
+                ?: return null
+            maxOf(
+                rights.optInt("usedQuota", -1),
+                rights.optInt("usedTimes", -1),
+                rights.optInt("drawUsedTimes", -1),
+                rights.optInt("totalUsedTimes", -1)
+            ).takeIf { it >= 0 }
+        } catch (t: Throwable) {
+            Log.printStackTrace(TAG, "queryGameCenterOpenedBoxCount err:", t)
+            null
         }
     }
 

@@ -1106,6 +1106,60 @@ object AntFarmRpcCall {
         }
     }
 
+    @JvmStatic
+    fun queryOptionalPlay(): String {
+        return try {
+            val args = JSONObject().apply {
+                put("bizType", "ANTFARM")
+                put(
+                    "commonDegradeFilterRequest",
+                    JSONObject().apply {
+                        put("appMode", "normal")
+                        put("deviceLevel", "high")
+                        put("initialized", true)
+                        put("platform", "Android")
+                        put("unityDeviceLevel", "high")
+                    }
+                )
+                put("playTypeList", JSONArray().put("TASK_TRIGGER").put("TOP_UP_COUPON"))
+                put("requestType", "NORMAL")
+                put("sceneCode", "ANTFARM_COMMON")
+                put("source", "H5")
+                put("version", GAME_CENTER_VERSION)
+            }
+            requestString(
+                "com.alipay.charitygamecenter.queryOptionalPlay",
+                JSONArray().put(args).toString()
+            )
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    @JvmStatic
+    fun receiveTaskAwardAntFarm(
+        sceneCode: String,
+        taskType: String,
+        awardCountForReceive: Int
+    ): String {
+        return try {
+            val args = JSONObject().apply {
+                put("awardCountForReceive", awardCountForReceive)
+                put("ignoreLimit", true)
+                put("requestType", "RPC")
+                put("sceneCode", sceneCode)
+                put("source", "antfarm")
+                put("taskType", taskType)
+            }
+            requestString(
+                "com.alipay.antieptask.receiveTaskAwardantfarm",
+                JSONArray().put(args).toString()
+            )
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
     // 小鸡换装
     @JvmStatic
     fun listOrnaments(): String {

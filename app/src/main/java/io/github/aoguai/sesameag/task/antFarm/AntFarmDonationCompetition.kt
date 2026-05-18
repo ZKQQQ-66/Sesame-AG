@@ -5,6 +5,7 @@ import io.github.aoguai.sesameag.data.StatusFlags
 import io.github.aoguai.sesameag.model.BaseModel
 import io.github.aoguai.sesameag.task.ModelTask
 import io.github.aoguai.sesameag.task.antFarm.AntFarm.Companion.TAG
+import io.github.aoguai.sesameag.util.DataStore
 import io.github.aoguai.sesameag.util.Log
 import io.github.aoguai.sesameag.util.ResChecker
 import io.github.aoguai.sesameag.util.TimeUtil
@@ -12,10 +13,49 @@ import io.github.aoguai.sesameag.util.maps.UserMap
 import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.temporal.ChronoUnit
+import kotlin.math.ceil
 
 /**
  * 捐蛋排位赛管理子模块：支持单次蹲点和轮询蹲点
  */
+
+private const val DONATION_COMPETITION_FIRST_SEEN_KEY_PREFIX = "antFarmDonationCompetitionStableFirstSeen::"
+private const val DONATION_COMPETITION_SETTLE_HOUR = 20
+private const val TOP_LEVEL_STAR_SENTINEL = 10000
+private const val DAY_MS = 24 * 60 * 60 * 1000L
+private val DONATION_COMPETITION_ZONE: ZoneId = ZoneId.of("Asia/Shanghai")
+
+private data class DonationAwardSnapshot(
+    val activityId: String,
+    val startTimeMs: Long,
+    val endTimeMs: Long,
+    val currentLevelId: Int,
+    val currentLevelName: String,
+    val starsToHighest: Int,
+    val totalStarsToHighest: Int,
+    val allRewardsReceived: Boolean
+)
+
+private data class StableDonationPlan(
+    val completed: Boolean = false,
+    val fallbackAggressive: Boolean = false,
+    val requiredStarsToday: Int = 0,
+    val starsToHighest: Int = 0,
+    val remainingRounds: Int = 0,
+    val bufferDays: Int = 0,
+    val maxDailyStars: Int = 0,
+    val currentLevelName: String = ""
+)
+
+private data class DonationRankTarget(
+    val rank: Int,
+    val eggsNeeded: Int,
+    val stars: Int
+)
 
 internal fun AntFarm.handleDonationCompetition() {
     if (donationCompetition?.value != true) return
@@ -33,11 +73,21 @@ internal fun AntFarm.handleDonationCompetition() {
     val creationWindowMs = 2 * checkIntervalMs
     val creationStartTime = endCal.timeInMillis - creationWindowMs
 
+    if (now > endCal.timeInMillis) return
+    if (isStableDonationCompetitionMode() && stableDonationCompetitionAnytimeCheck?.value == true) {
+        if (hasCompletedStableDonationCompetition()) {
+            return
+        }
+        runStableDonationAnytimeCheck(endCal.timeInMillis)
+    }
+
     if (now < creationStartTime) {
         Log.record(TAG, "当前不在排位赛任务调度时间内")
         return
     }
-    if (now > endCal.timeInMillis) return
+    if (isStableDonationCompetitionMode() && hasCompletedStableDonationCompetition()) {
+        return
+    }
 
     try {
         val res = AntFarmRpcCall.enterDonationCompetitionRank()
@@ -157,6 +207,259 @@ private fun formatDonationAwardFailure(jo: JSONObject): String {
         .ifBlank { jo.toString() }
 }
 
+private fun AntFarm.isStableDonationCompetitionMode(): Boolean {
+    return donationCompetitionMode?.value == AntFarm.DonationCompetitionMode.STABLE
+}
+
+private fun AntFarm.hasCompletedStableDonationCompetition(): Boolean {
+    val snapshot = queryDonationAwardSnapshot() ?: return false
+    if (!snapshot.allRewardsReceived || snapshot.starsToHighest > 0) return false
+    Log.record(TAG, "排位赛稳定模式：最高段位奖励已领取完成，跳过排位赛处理")
+    return true
+}
+
+private fun queryDonationAwardSnapshot(): DonationAwardSnapshot? {
+    return try {
+        val res = AntFarmRpcCall.enterCompetitionAwardPage()
+        val jo = JSONObject(res)
+        if (!ResChecker.checkRes(TAG, jo)) {
+            Log.record(TAG, "进入排位赛奖励页失败：${formatDonationAwardFailure(jo)}")
+            return null
+        }
+        parseDonationAwardSnapshot(jo)
+    } catch (e: Exception) {
+        Log.printStackTrace(TAG, "queryDonationAwardSnapshot err:", e)
+        null
+    }
+}
+
+private fun parseDonationAwardSnapshot(jo: JSONObject): DonationAwardSnapshot? {
+    val userLevelInfo = jo.optJSONObject("userDonationLevelInfo") ?: return null
+    val awardList = jo.optJSONArray("levelAwardInfoList") ?: return null
+    val activityConf = jo.optJSONObject("donationCompetitionActivityConf")
+
+    val currentLevelId = userLevelInfo.optInt("levelId")
+    val currentLevelName = userLevelInfo.optString("levelName", "未知")
+    val lightStars = userLevelInfo.optInt("levelLightStarNum", 0)
+
+    var starsToHighest = 0
+    var totalStarsToHighest = 0
+    var validAwardCount = 0
+    var receivedAwardCount = 0
+
+    for (i in 0 until awardList.length()) {
+        val levelItem = awardList.optJSONObject(i) ?: continue
+        val upNum = levelItem.optInt("levelStarUpNum", 0)
+        if (levelItem.optString("rightsId").isNotBlank()) {
+            validAwardCount++
+            if (levelItem.optString("status").equals("received", ignoreCase = true)) {
+                receivedAwardCount++
+            }
+        }
+        if (upNum >= TOP_LEVEL_STAR_SENTINEL) continue
+
+        totalStarsToHighest += upNum
+        if (levelItem.optInt("levelId") >= currentLevelId) {
+            starsToHighest += upNum
+        }
+    }
+
+    starsToHighest = (starsToHighest - lightStars).coerceAtLeast(0)
+    return DonationAwardSnapshot(
+        activityId = activityConf?.optString("activityId")?.takeIf { it.isNotBlank() } ?: "unknown",
+        startTimeMs = activityConf?.optLong("startTime", 0L) ?: 0L,
+        endTimeMs = activityConf?.optLong("endTime", 0L) ?: 0L,
+        currentLevelId = currentLevelId,
+        currentLevelName = currentLevelName,
+        starsToHighest = starsToHighest,
+        totalStarsToHighest = totalStarsToHighest,
+        allRewardsReceived = validAwardCount > 0 && receivedAwardCount == validAwardCount
+    )
+}
+
+private fun AntFarm.buildStableDonationPlan(rankList: JSONArray): StableDonationPlan? {
+    val snapshot = queryDonationAwardSnapshot() ?: return null
+    val maxDailyStars = maxRewardStars(rankList)
+    if (snapshot.starsToHighest <= 0) {
+        return StableDonationPlan(
+            completed = true,
+            starsToHighest = snapshot.starsToHighest,
+            maxDailyStars = maxDailyStars,
+            currentLevelName = snapshot.currentLevelName
+        )
+    }
+    if (snapshot.endTimeMs <= 0L || maxDailyStars <= 0) {
+        return StableDonationPlan(
+            fallbackAggressive = true,
+            starsToHighest = snapshot.starsToHighest,
+            maxDailyStars = maxDailyStars,
+            currentLevelName = snapshot.currentLevelName
+        )
+    }
+
+    val now = System.currentTimeMillis()
+    val firstSeenMs = resolveDonationCompetitionFirstSeen(snapshot)
+    val totalRounds = countDonationCompetitionRounds(firstSeenMs, snapshot.endTimeMs).coerceAtLeast(1)
+    val averageStars = snapshot.totalStarsToHighest.toDouble() / totalRounds
+    val bufferDays = if (averageStars <= 2.0) 7 else 3
+    val targetEndTimeMs = snapshot.endTimeMs - bufferDays * DAY_MS
+    val remainingRounds = countDonationCompetitionRounds(now, targetEndTimeMs)
+    if (remainingRounds <= 0) {
+        return StableDonationPlan(
+            fallbackAggressive = true,
+            starsToHighest = snapshot.starsToHighest,
+            remainingRounds = remainingRounds,
+            bufferDays = bufferDays,
+            maxDailyStars = maxDailyStars,
+            currentLevelName = snapshot.currentLevelName
+        )
+    }
+
+    val requiredStarsToday = ceil(snapshot.starsToHighest.toDouble() / remainingRounds).toInt().coerceAtLeast(1)
+    val mustTakeTopEveryDay = requiredStarsToday >= maxDailyStars ||
+        snapshot.starsToHighest > maxDailyStars * remainingRounds
+    return StableDonationPlan(
+        fallbackAggressive = mustTakeTopEveryDay,
+        requiredStarsToday = requiredStarsToday,
+        starsToHighest = snapshot.starsToHighest,
+        remainingRounds = remainingRounds,
+        bufferDays = bufferDays,
+        maxDailyStars = maxDailyStars,
+        currentLevelName = snapshot.currentLevelName
+    )
+}
+
+private fun AntFarm.resolveDonationCompetitionFirstSeen(snapshot: DonationAwardSnapshot): Long {
+    if (snapshot.startTimeMs > 0L) return snapshot.startTimeMs
+
+    val uid = UserMap.currentUid ?: ownerFarmId ?: "unknown"
+    val firstSeenKey = "$DONATION_COMPETITION_FIRST_SEEN_KEY_PREFIX$uid::${snapshot.activityId}"
+    val stored = DataStore.get(firstSeenKey, Long::class.javaObjectType)?.takeIf { it > 0L }
+    if (stored != null) return stored
+
+    val now = System.currentTimeMillis()
+    DataStore.put(firstSeenKey, now)
+    return now
+}
+
+private fun countDonationCompetitionRounds(fromMs: Long, untilMs: Long): Int {
+    if (fromMs <= 0L || untilMs <= 0L || untilMs <= fromMs) return 0
+
+    val from = Instant.ofEpochMilli(fromMs).atZone(DONATION_COMPETITION_ZONE)
+    val until = Instant.ofEpochMilli(untilMs).atZone(DONATION_COMPETITION_ZONE)
+    var firstRoundDate: LocalDate = from.toLocalDate()
+    if (from.hour >= DONATION_COMPETITION_SETTLE_HOUR) {
+        firstRoundDate = firstRoundDate.plusDays(1)
+    }
+
+    var lastRoundDate: LocalDate = until.toLocalDate()
+    if (until.hour < DONATION_COMPETITION_SETTLE_HOUR) {
+        lastRoundDate = lastRoundDate.minusDays(1)
+    }
+
+    return (ChronoUnit.DAYS.between(firstRoundDate, lastRoundDate) + 1).toInt().coerceAtLeast(0)
+}
+
+private fun maxRewardStars(rankList: JSONArray): Int {
+    var maxStars = 0
+    for (i in 0 until rankList.length()) {
+        val user = rankList.optJSONObject(i) ?: continue
+        maxStars = maxOf(maxStars, user.optInt("rewardStarNum", 0))
+    }
+    return maxStars
+}
+
+private fun selectAggressiveDonationTarget(
+    rankList: JSONArray,
+    myRank: Int,
+    myStars: Int,
+    serverDonationTotal: Int,
+    effectiveRemainingQuota: Int
+): DonationRankTarget? {
+    var target: DonationRankTarget? = null
+
+    for (i in 0 until rankList.length()) {
+        val other = rankList.getJSONObject(i)
+        val otherRank = other.getInt("rankOrder")
+        if (otherRank >= myRank) break
+
+        val otherStars = other.optInt("rewardStarNum", 0)
+        if (otherStars <= myStars) continue
+
+        val eggsNeeded = other.getInt("donationNum") - serverDonationTotal + 1
+        if (eggsNeeded <= 0 || eggsNeeded > effectiveRemainingQuota) continue
+
+        val currentTarget = target
+        if (currentTarget == null ||
+            otherStars > currentTarget.stars ||
+            (otherStars == currentTarget.stars && eggsNeeded < currentTarget.eggsNeeded)
+        ) {
+            target = DonationRankTarget(otherRank, eggsNeeded, otherStars)
+        }
+    }
+    return target
+}
+
+private fun selectStableDonationTarget(
+    rankList: JSONArray,
+    myRank: Int,
+    myStars: Int,
+    serverDonationTotal: Int,
+    effectiveRemainingQuota: Int,
+    requiredStarsToday: Int
+): DonationRankTarget? {
+    var target: DonationRankTarget? = null
+
+    for (i in 0 until rankList.length()) {
+        val other = rankList.getJSONObject(i)
+        val otherRank = other.getInt("rankOrder")
+        if (otherRank >= myRank) break
+
+        val otherStars = other.optInt("rewardStarNum", 0)
+        if (otherStars <= myStars || otherStars < requiredStarsToday) continue
+
+        val eggsNeeded = other.getInt("donationNum") - serverDonationTotal + 1
+        if (eggsNeeded <= 0 || eggsNeeded > effectiveRemainingQuota) continue
+
+        val currentTarget = target
+        if (currentTarget == null ||
+            eggsNeeded < currentTarget.eggsNeeded ||
+            (eggsNeeded == currentTarget.eggsNeeded && otherStars < currentTarget.stars)
+        ) {
+            target = DonationRankTarget(otherRank, eggsNeeded, otherStars)
+        }
+    }
+    return target
+}
+
+private fun AntFarm.runStableDonationAnytimeCheck(endTimeMs: Long): Boolean {
+    if (!isStableDonationCompetitionMode()) return false
+    if (stableDonationCompetitionAnytimeCheck?.value != true) return false
+    if (System.currentTimeMillis() >= endTimeMs) return false
+
+    val taskId = "DR|$ownerFarmId"
+    if (hasChildTask(taskId)) {
+        Log.record(TAG, "排位赛稳定模式非蹲点评估：已存在蹲点任务，跳过本轮评估")
+        return false
+    }
+
+    val uid = UserMap.currentUid ?: return false
+    val maxDonation = maxDailyDonationCompetitionCount?.value ?: -1
+    val currentDonated = Status.getDailyDonationTotal(uid)
+    if (maxDonation >= 0 && currentDonated >= maxDonation) {
+        Log.record(TAG, "排位赛稳定模式非蹲点评估：今日已捐蛋总数($currentDonated)已达每日捐蛋上限($maxDonation)，跳过")
+        return false
+    }
+
+    val remainingQuota = if (maxDonation < 0) {
+        Int.MAX_VALUE
+    } else {
+        maxDonation - currentDonated
+    }
+    Log.record(TAG, "排位赛稳定模式非蹲点评估：按今日目标星数检查是否需要补捐")
+    return checkRankAndDonate(remainingQuota, allowAggressiveFallback = false)
+}
+
 /**
  * 统一调度蹲点任务
  * 逻辑：轮询蹲点开启时忽略单次蹲点，否则按单次蹲点时间运行
@@ -245,7 +548,10 @@ private suspend fun AntFarm.runDonationRankWatchLoop(endTimeMs: Long) {
     Log.record(TAG, "🏁 轮询蹲点结束")
 }
 
-private fun AntFarm.checkRankAndDonate(remainingQuota: Int): Boolean {
+private fun AntFarm.checkRankAndDonate(
+    remainingQuota: Int,
+    allowAggressiveFallback: Boolean = true
+): Boolean {
     try {
         val myUid = UserMap.currentUid ?: return false
         val res = AntFarmRpcCall.enterDonationCompetitionRank()
@@ -273,17 +579,18 @@ private fun AntFarm.checkRankAndDonate(remainingQuota: Int): Boolean {
 
                 val serverDonationTotal = myData.getInt("donationNum")
                 val localDonationTotal = Status.getDailyDonationTotal(myUid)
-                if (serverDonationTotal != localDonationTotal) {
+                if (serverDonationTotal > localDonationTotal) {
                     Status.updateDailyDonationTotal(myUid, serverDonationTotal, incremental = false)
                 }
+                val dailyDonationTotal = maxOf(serverDonationTotal, localDonationTotal)
                 val maxDonation = maxDailyDonationCompetitionCount?.value ?: -1
                 val effectiveRemainingQuota = if (maxDonation < 0) {
                     remainingQuota
                 } else {
-                    minOf(remainingQuota, maxDonation - serverDonationTotal)
+                    minOf(remainingQuota, maxDonation - dailyDonationTotal)
                 }
                 if (effectiveRemainingQuota <= 0) {
-                    Log.record(TAG, "今日已捐蛋总数($serverDonationTotal)已达每日捐蛋上限($maxDonation)，放弃补捐")
+                    Log.record(TAG, "今日已捐蛋总数($dailyDonationTotal)已达每日捐蛋上限($maxDonation)，放弃补捐")
                     return false
                 }
 
@@ -296,45 +603,98 @@ private fun AntFarm.checkRankAndDonate(remainingQuota: Int): Boolean {
                     return false
                 }
 
-                // 寻找能提升星星奖励的目标
-                var targetRank = -1
-                var targetEggsNeeded = -1
-                var targetStarsExpected = myStars
-
-                // 从第一名开始向下遍历，寻找配额内能达到的最高星级
-                for (i in 0 until rankList.length()) {
-                    val other = rankList.getJSONObject(i)
-                    val oRank = other.getInt("rankOrder")
-                    if (oRank >= myRank) break // 只看比我名次高的
-
-                    val oStars = other.optInt("rewardStarNum", 0)
-                    val oDonation = other.getInt("donationNum")
-
-                    // 只有当该名次的奖励高于我当前的奖励时才考虑
-                    if (oStars > myStars) {
-                        val eggsNeeded = oDonation - serverDonationTotal + 1
-                        if (eggsNeeded <= effectiveRemainingQuota) {
-                            // 如果这个名次的星星比之前发现的目标更高，或者星星一样但更省蛋
-                            if (oStars > targetStarsExpected) {
-                                targetStarsExpected = oStars
-                                targetEggsNeeded = eggsNeeded
-                                targetRank = oRank
-                            } else if (oStars == targetStarsExpected) {
-                                // 同样多的星星，选择更省蛋的名次
-                                if (targetEggsNeeded == -1 || eggsNeeded < targetEggsNeeded) {
-                                    targetEggsNeeded = eggsNeeded
-                                    targetRank = oRank
-                                }
-                            }
-                        }
-                    }
+                val stablePlan = if (isStableDonationCompetitionMode()) {
+                    buildStableDonationPlan(rankList)
+                } else {
+                    null
+                }
+                if (isStableDonationCompetitionMode() && !allowAggressiveFallback && stablePlan == null) {
+                    Log.record(TAG, "排位赛稳定模式非蹲点评估：无法计算稳定目标，跳过本轮评估")
+                    return false
+                }
+                if (stablePlan?.completed == true) {
+                    Log.record(TAG, "排位赛稳定模式：已达最高段位奖励目标，跳过今日排位赛捐赠")
+                    return false
                 }
 
-                if (targetRank != -1 && targetEggsNeeded > 0) {
-                    Log.record(TAG, "精明捐赠：当前奖励${myStars}星，目标排名${targetRank}(奖励${targetStarsExpected}星)，需反超${targetEggsNeeded}个蛋")
-                    if (donateForCompetition(targetEggsNeeded)) {
+                val target = if (stablePlan != null && !stablePlan.fallbackAggressive) {
+                    if (myStars >= stablePlan.requiredStarsToday) {
+                        Log.record(
+                            TAG,
+                            "排位赛稳定模式：当前奖励${myStars}星已达到今日目标${stablePlan.requiredStarsToday}星，跳过捐赠"
+                        )
+                        return false
+                    }
+
+                    selectStableDonationTarget(
+                        rankList,
+                        myRank,
+                        myStars,
+                        serverDonationTotal,
+                        effectiveRemainingQuota,
+                        stablePlan.requiredStarsToday
+                    ) ?: run {
+                        if (!allowAggressiveFallback) {
+                            Log.record(
+                                TAG,
+                                "排位赛稳定模式非蹲点评估：剩余配额(${effectiveRemainingQuota})无法达到今日目标${stablePlan.requiredStarsToday}星，跳过本轮评估"
+                            )
+                            return false
+                        }
+                        Log.record(
+                            TAG,
+                            "排位赛稳定模式：剩余配额(${effectiveRemainingQuota})无法达到今日目标${stablePlan.requiredStarsToday}星，回退激进评估"
+                        )
+                        selectAggressiveDonationTarget(
+                            rankList,
+                            myRank,
+                            myStars,
+                            serverDonationTotal,
+                            effectiveRemainingQuota
+                        )
+                    }
+                } else {
+                    if (stablePlan?.fallbackAggressive == true) {
+                        if (!allowAggressiveFallback) {
+                            Log.record(
+                                TAG,
+                                "排位赛稳定模式非蹲点评估：剩余${stablePlan.starsToHighest}星/${stablePlan.remainingRounds}轮，" +
+                                    "需要每日${stablePlan.requiredStarsToday}星，需回退激进，跳过本轮评估"
+                            )
+                            return false
+                        }
+                        Log.record(
+                            TAG,
+                            "排位赛稳定模式：剩余${stablePlan.starsToHighest}星/${stablePlan.remainingRounds}轮，" +
+                                "需要每日${stablePlan.requiredStarsToday}星，回退激进模式"
+                        )
+                    }
+                    selectAggressiveDonationTarget(
+                        rankList,
+                        myRank,
+                        myStars,
+                        serverDonationTotal,
+                        effectiveRemainingQuota
+                    )
+                }
+
+                if (target != null) {
+                    val plan = stablePlan
+                    if (plan != null && !plan.fallbackAggressive) {
+                        Log.record(
+                            TAG,
+                            "稳定捐赠：当前奖励${myStars}星，今日目标${plan.requiredStarsToday}星，" +
+                                "目标排名${target.rank}(奖励${target.stars}星)，需反超${target.eggsNeeded}个蛋"
+                        )
+                    } else {
+                        Log.record(
+                            TAG,
+                            "精明捐赠：当前奖励${myStars}星，目标排名${target.rank}(奖励${target.stars}星)，需反超${target.eggsNeeded}个蛋"
+                        )
+                    }
+                    if (donateForCompetition(target.eggsNeeded)) {
                         // 捐赠成功后立即手动更新一次本地计数
-                        Status.updateDailyDonationTotal(myUid, targetEggsNeeded, incremental = true)
+                        Status.updateDailyDonationTotal(myUid, target.eggsNeeded, incremental = true)
                         return true
                     }
                 } else {
