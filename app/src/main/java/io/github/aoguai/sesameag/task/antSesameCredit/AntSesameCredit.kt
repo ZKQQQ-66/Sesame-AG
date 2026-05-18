@@ -1592,10 +1592,38 @@ class AntSesameCredit : ModelTask() {
             .orEmpty()
             .ifBlank { response?.optString("resultCode").orEmpty() }
             .ifBlank { response?.optString("code").orEmpty() }
+        val message = response?.let { extractZhimaTreeActionFailureMessage(it) }.orEmpty()
         return when (code) {
             "20020012" -> "parameter_invalid"
-            else -> "rpc_failed"
+            "10001011" -> "business_limited"
+            "10000702" -> "business_restricted"
+            else -> when {
+                message.contains("已领取") ||
+                    message.contains("已发放") ||
+                    message.contains("已完成") ||
+                    message.contains("重复") -> "duplicate_or_already_done"
+                message.contains("风控") ||
+                    message.contains("风险") ||
+                    message.contains("安全") ||
+                    message.contains("cheating traffic", ignoreCase = true) -> "risk_limited"
+                message.contains("次数超过限制") ||
+                    message.contains("达到上限") ||
+                    message.contains("当日上限") -> "business_limited"
+                message.contains("营销规则验证不通过") ||
+                    message.contains("验证不通过") -> "business_restricted"
+                response?.optBoolean("canRetry", true) == false -> "non_retryable"
+                else -> "rpc_failed"
+            }
         }
+    }
+
+    private fun extractZhimaTreeActionFailureMessage(response: JSONObject): String {
+        return response.optString("errorMsg")
+            .ifBlank { response.optString("errorMessage") }
+            .ifBlank { response.optString("resultDesc") }
+            .ifBlank { response.optString("resultView") }
+            .ifBlank { response.optString("desc") }
+            .ifBlank { response.optString("memo") }
     }
 
     private fun logZhimaTreeActionFailure(
@@ -1610,10 +1638,8 @@ class AntSesameCredit : ModelTask() {
             .ifBlank { response?.optString("resultCode").orEmpty() }
             .ifBlank { response?.optString("code").orEmpty() }
             .ifBlank { "<empty>" }
-        val message = response?.optString("errorMsg")
+        val message = response?.let { extractZhimaTreeActionFailureMessage(it) }
             .orEmpty()
-            .ifBlank { response?.optString("resultDesc").orEmpty() }
-            .ifBlank { response?.optString("desc").orEmpty() }
             .ifBlank { "<empty>" }
         Log.error(
             TAG,

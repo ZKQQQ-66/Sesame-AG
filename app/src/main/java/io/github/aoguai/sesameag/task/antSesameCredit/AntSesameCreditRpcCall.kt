@@ -288,8 +288,9 @@ object AntSesameCreditRpcCall {
     }
 
     private const val ZHIMATREE_PLAY_INFO = "SwbtxJSo8OOUrymAU%2FHnY2jyFRc%2BkCJ3"
+    private const val ZHIMATREE_CH_INFO = "ch_url-https://2021002135657012.hybrid.alipay-eco.com/index.html"
     private const val ZHIMATREE_REFER =
-        "https://render.alipay.com/p/yuyan/180020010001269849/zmTree.html?caprMode=sync&chInfo=chInfo=ch_zmzltf__chsub_xinyongsyyingxiaowei"
+        "https://render.alipay.com/p/yuyan/180020010001288004/zmTree.html?caprMode=sync&chInfo=ch_zmzlzms__chsub_zlsy_icon"
 
     @JvmStatic
     fun zhimaTreeHomePage(): String? {
@@ -335,7 +336,7 @@ object AntSesameCreditRpcCall {
     fun queryRentGreenTaskList(): String? {
         return try {
             val extInfo = JSONObject().apply {
-                put("chInfo", "ch_share__chsub_ALPContact")
+                put("chInfo", ZHIMATREE_CH_INFO)
                 put("batchId", "")
             }
             val args = JSONObject().apply {
@@ -357,7 +358,7 @@ object AntSesameCreditRpcCall {
     fun rentGreenTaskFinish(taskId: String, stageCode: String): String? {
         return try {
             val extInfo = JSONObject().apply {
-                put("chInfo", "ch_share__chsub_ALPContact")
+                put("chInfo", ZHIMATREE_CH_INFO)
                 put("taskId", taskId)
                 put("stageCode", stageCode)
             }
